@@ -1,0 +1,158 @@
+From 6cf151bd571ab6288ab0bfa7bc4c854bef012183 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Andreas=20M=C3=BCller?= <schnitzeltony@googlemail.com>
+Date: Mon, 23 Jan 2017 19:32:06 +0100
+Subject: [PATCH] fluid_rvoice_dsp_interpolate_4th_order: make use of ARM NEON
+ intriniscs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Upstream-Status: Pending
+
+Signed-off-by: Andreas Müller <schnitzeltony@googlemail.com>
+---
+ src/rvoice/fluid_rvoice_dsp.c | 87 ++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 86 insertions(+), 1 deletion(-)
+
+diff --git a/src/rvoice/fluid_rvoice_dsp.c b/src/rvoice/fluid_rvoice_dsp.c
+index df7da50..ca4a807 100644
+--- a/src/rvoice/fluid_rvoice_dsp.c
++++ b/src/rvoice/fluid_rvoice_dsp.c
+@@ -22,6 +22,9 @@
+ #include "fluid_phase.h"
+ #include "fluid_rvoice.h"
+ #include "fluid_sys.h"
++#ifdef __ARM_NEON__
++#include <arm_neon.h>
++#endif
+ 
+ /* Purpose:
+  *
+@@ -279,13 +282,19 @@ fluid_rvoice_dsp_interpolate_4th_order (fluid_rvoice_dsp_t *voice)
+   fluid_phase_t dsp_phase_incr;
+   short int *dsp_data = voice->sample->data;
+   fluid_real_t *dsp_buf = voice->dsp_buf;
++#if defined(__ARM_NEON__) && defined(WITH_FLOAT)
++  float32x4_t dsp_amp = vdupq_n_f32(voice->amp);
++  float32x4_t dsp_amp_incr = vdupq_n_f32(voice->amp_incr);
++  float32x4_t coeffs;
++#else
+   fluid_real_t dsp_amp = voice->amp;
+   fluid_real_t dsp_amp_incr = voice->amp_incr;
++  fluid_real_t *coeffs;
++#endif
+   unsigned int dsp_i = 0;
+   unsigned int dsp_phase_index;
+   unsigned int start_index, end_index;
+   short int start_point, end_point1, end_point2;
+-  fluid_real_t *coeffs;
+   int looping;
+ 
+   /* Convert playback "speed" floating point value to phase index/fract */
+@@ -327,11 +336,22 @@ fluid_rvoice_dsp_interpolate_4th_order (fluid_rvoice_dsp_t *voice)
+     /* interpolate first sample point (start or loop start) if needed */
+     for ( ; dsp_phase_index == start_index && dsp_i < FLUID_BUFSIZE; dsp_i++)
+     {
++#if defined(__ARM_NEON__) && defined(WITH_FLOAT)
++      coeffs = vld1q_f32(interp_coeff[fluid_phase_fract_to_tablerow (dsp_phase)]);
++      int16x4_t vdsp_data_i16 = vld1_s16(&dsp_data[dsp_phase_index-1]);
++      vdsp_data_i16 = vld1_lane_s16(&start_point, vdsp_data_i16, 0);
++      float32x4_t vdsp_data = vcvtq_f32_s32(vmovl_s16(vdsp_data_i16));
++      vdsp_data *= coeffs;
++      vdsp_data *= dsp_amp;
++      float32x2_t sum2 = vadd_f32(vget_high_f32(vdsp_data), vget_low_f32(vdsp_data));
++      dsp_buf[dsp_i] = vget_lane_f32(vpadd_f32(sum2, sum2), 0);
++#else
+       coeffs = interp_coeff[fluid_phase_fract_to_tablerow (dsp_phase)];
+       dsp_buf[dsp_i] = dsp_amp * (coeffs[0] * start_point
+ 				  + coeffs[1] * dsp_data[dsp_phase_index]
+ 				  + coeffs[2] * dsp_data[dsp_phase_index+1]
+ 				  + coeffs[3] * dsp_data[dsp_phase_index+2]);
++#endif
+ 
+       /* increment phase and amplitude */
+       fluid_phase_incr (dsp_phase, dsp_phase_incr);
+@@ -342,11 +362,21 @@ fluid_rvoice_dsp_interpolate_4th_order (fluid_rvoice_dsp_t *voice)
+     /* interpolate the sequence of sample points */
+     for ( ; dsp_i < FLUID_BUFSIZE && dsp_phase_index <= end_index; dsp_i++)
+     {
++#if defined(__ARM_NEON__) && defined(WITH_FLOAT)
++      coeffs = vld1q_f32(interp_coeff[fluid_phase_fract_to_tablerow (dsp_phase)]);
++      int16x4_t vdsp_data_i16 = vld1_s16(&dsp_data[dsp_phase_index-1]);
++      float32x4_t vdsp_data = vcvtq_f32_s32(vmovl_s16(vdsp_data_i16));
++      vdsp_data *= coeffs;
++      vdsp_data *= dsp_amp;
++      float32x2_t sum2 = vadd_f32(vget_high_f32(vdsp_data), vget_low_f32(vdsp_data));
++      dsp_buf[dsp_i] = vget_lane_f32(vpadd_f32(sum2, sum2), 0);
++#else
+       coeffs = interp_coeff[fluid_phase_fract_to_tablerow (dsp_phase)];
+       dsp_buf[dsp_i] = dsp_amp * (coeffs[0] * dsp_data[dsp_phase_index-1]
+ 				  + coeffs[1] * dsp_data[dsp_phase_index]
+ 				  + coeffs[2] * dsp_data[dsp_phase_index+1]
+ 				  + coeffs[3] * dsp_data[dsp_phase_index+2]);
++#endif
+ 
+       /* increment phase and amplitude */
+       fluid_phase_incr (dsp_phase, dsp_phase_incr);
+@@ -362,11 +392,22 @@ fluid_rvoice_dsp_interpolate_4th_order (fluid_rvoice_dsp_t *voice)
+     /* interpolate within 2nd to last point */
+     for (; dsp_phase_index <= end_index && dsp_i < FLUID_BUFSIZE; dsp_i++)
+     {
++#if defined(__ARM_NEON__) && defined(WITH_FLOAT)
++      coeffs = vld1q_f32(interp_coeff[fluid_phase_fract_to_tablerow (dsp_phase)]);
++      int16x4_t vdsp_data_i16 = vld1_s16(&dsp_data[dsp_phase_index-1]);
++      vdsp_data_i16 = vld1_lane_s16(&end_point1, vdsp_data_i16, 3);
++      float32x4_t vdsp_data = vcvtq_f32_s32(vmovl_s16(vdsp_data_i16));
++      vdsp_data *= coeffs;
++      vdsp_data *= dsp_amp;
++      float32x2_t sum2 = vadd_f32(vget_high_f32(vdsp_data), vget_low_f32(vdsp_data));
++      dsp_buf[dsp_i] = vget_lane_f32(vpadd_f32(sum2, sum2), 0);
++#else
+       coeffs = interp_coeff[fluid_phase_fract_to_tablerow (dsp_phase)];
+       dsp_buf[dsp_i] = dsp_amp * (coeffs[0] * dsp_data[dsp_phase_index-1]
+ 				  + coeffs[1] * dsp_data[dsp_phase_index]
+ 				  + coeffs[2] * dsp_data[dsp_phase_index+1]
+ 				  + coeffs[3] * end_point1);
++#endif
+ 
+       /* increment phase and amplitude */
+       fluid_phase_incr (dsp_phase, dsp_phase_incr);
+@@ -379,11 +420,23 @@ fluid_rvoice_dsp_interpolate_4th_order (fluid_rvoice_dsp_t *voice)
+     /* interpolate within the last point */
+     for (; dsp_phase_index <= end_index && dsp_i < FLUID_BUFSIZE; dsp_i++)
+     {
++#if defined(__ARM_NEON__) && defined(WITH_FLOAT)
++      coeffs = vld1q_f32(interp_coeff[fluid_phase_fract_to_tablerow (dsp_phase)]);
++      int16x4_t vdsp_data_i16 = vld1_s16(&dsp_data[dsp_phase_index-1]);
++      vdsp_data_i16 = vld1_lane_s16(&end_point1, vdsp_data_i16, 2);
++      vdsp_data_i16 = vld1_lane_s16(&end_point2, vdsp_data_i16, 3);
++      float32x4_t vdsp_data = vcvtq_f32_s32(vmovl_s16(vdsp_data_i16));
++      vdsp_data *= coeffs;
++      vdsp_data *= dsp_amp;
++      float32x2_t sum2 = vadd_f32(vget_high_f32(vdsp_data), vget_low_f32(vdsp_data));
++      dsp_buf[dsp_i] = vget_lane_f32(vpadd_f32(sum2, sum2), 0);
++#else
+       coeffs = interp_coeff[fluid_phase_fract_to_tablerow (dsp_phase)];
+       dsp_buf[dsp_i] = dsp_amp * (coeffs[0] * dsp_data[dsp_phase_index-1]
+ 				  + coeffs[1] * dsp_data[dsp_phase_index]
+ 				  + coeffs[2] * end_point1
+ 				  + coeffs[3] * end_point2);
++#endif
+ 
+       /* increment phase and amplitude */
+       fluid_phase_incr (dsp_phase, dsp_phase_incr);
+@@ -413,7 +466,11 @@ fluid_rvoice_dsp_interpolate_4th_order (fluid_rvoice_dsp_t *voice)
+   }
+ 
+   voice->phase = dsp_phase;
++#if defined(__ARM_NEON__) && defined(WITH_FLOAT)
++  vst1q_lane_f32(&voice->amp, dsp_amp, 0);
++#else
+   voice->amp = dsp_amp;
++#endif
+ 
+   return (dsp_i);
+ }
+-- 
+2.5.5
+
