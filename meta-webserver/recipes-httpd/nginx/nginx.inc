@@ -20,7 +20,10 @@ SRC_URI = " \
     file://nginx.service \
 "
 
-inherit update-rc.d useradd
+inherit update-rc.d useradd systemd
+
+SYSTEMD_SERVICE_${PN} = "nginx.service"
+SYSTEMD_AUTO_ENABLE_${PN} = "disable"
 
 CFLAGS_append = " -fPIE -pie"
 CXXFLAGS_append = " -fPIE -pie"
